@@ -942,3 +942,35 @@ if hasattr(_ast, "Match"):
         mutated = [mutation_patch(d, canonical) for d in deltas]
         assert any("case 1:" not in m for m in mutated)
         assert any("case 2:" not in m for m in mutated)
+
+
+def test_replay_ignored_survivor_removes_only_its_result(tmp_path, monkeypatch):
+    import zlib
+    from difflib import unified_diff
+
+    import mutation
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "m.py").write_text("x = 1\n")
+    diff_text = "\n".join(
+        unified_diff(["x = 1"], ["x = 2"], fromfile="a/m.py", tofile="b/m.py", lineterm="")
+    )
+    uid = mutation.make_uid()
+    other_uid = mutation.make_uid()
+    with mutation.database_open(".", recreate=True) as db:
+        db.store_mutations([(uid, "m.py", zlib.compress(diff_text.encode()))])
+        db.set_result(uid, 0)
+        db.set_result(other_uid, 0)
+    mutation.write_ignored_file(".", diff_text, "m.py", "equivalent")
+
+    def unexpected_run(*args, **kwargs):
+        raise AssertionError("An ignored mutation must not launch pytest")
+
+    monkeypatch.setattr(mutation, "run", unexpected_run)
+    assert mutation.replay_mutation(uid, 1, 0, 1, []) is None
+    with mutation.database_open(".") as db:
+        rows = db.list_results_for_replay()
+        assert all(row[0] != uid for row in rows)
+        assert any(row[0] == other_uid for row in rows)
+        assert db.get_mutation(uid)[0] == "m.py"
+    assert len(list((tmp_path / ".mutations.ignored").glob("*.diff"))) == 1
